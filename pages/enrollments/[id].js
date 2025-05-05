@@ -48,11 +48,20 @@ export async function getServerSideProps(context) {
         const completedLessons = enrollment.lessons_completed.map(item => ({
             id: item.lms_lessons_id.id,
             title: item.lms_lessons_id.title,
+            sort: item.lms_lessons_id.sort,
             module: {
                 id: item.lms_lessons_id.module.id,
-                title: item.lms_lessons_id.module.title
+                title: item.lms_lessons_id.module.title,
+                sort: item.lms_lessons_id.module.sort
             }
-        }));
+        })).sort((a, b) => {
+            // First sort by module.sort
+            const moduleSortDiff = a.module.sort - b.module.sort;
+            if (moduleSortDiff !== 0) return moduleSortDiff;
+
+            // Then sort by lesson sort
+            return a.sort - b.sort;
+        });
 
         return {
             props: {
