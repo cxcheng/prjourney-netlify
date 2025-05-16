@@ -1,13 +1,17 @@
 import { useRouter } from 'next/router';
 import Head from 'next/head';
-import { useEffect, useState } from 'react';
+import Link from "next/link";
 
 export async function getServerSideProps(context) {
-    const { id } = context.params;
+    const { id, query } = context.params;
     try {
-        // Existing enrollment data fetching
+        const baseUrl = process.env.PUBLIC_URL || "http://localhost:3000";
+        const callbackUrl = `${baseUrl}/enrollments/${id}`;
+
+        const headers = { 'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}` };
+
+        // 1. Fetch enrollment data
         const enrollmentUrl = `${process.env.NEXT_PUBLIC_OPTICAL_API_ENDPOINT}/items/lms_enrollments/${id}`;
-        const enrollmentHeaders = { 'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}` };
         const enrollmentParams = {
             fields: [
                 'id',
@@ -24,19 +28,16 @@ export async function getServerSideProps(context) {
                 'lessons_completed.lms_lessons_id.sort',
                 'lessons_completed.lms_lessons_id.module.title',
                 'lessons_completed.lms_lessons_id.module.id',
-                'lessons_completed.lms_lessons_id.module.lessons.id',
-                'lessons_completed.lms_lessons_id.module.lessons.title',
                 'lessons_completed.lms_lessons_id.module.sort',
             ].join(','),
             sort: [
                 'lessons_completed.lms_lessons_id.module.sort',
                 'lessons_completed.lms_lessons_id.sort'
             ].join(',')
-
         };
 
         const queryString = new URLSearchParams(enrollmentParams).toString();
-        const enrollmentResponse = await fetch(`${enrollmentUrl}?${queryString}`, { headers: enrollmentHeaders });
+        const enrollmentResponse = await fetch(`${enrollmentUrl}?${queryString}`, { headers });
 
         if (!enrollmentResponse.ok) {
             throw new Error(`Failed to fetch enrollment: ${enrollmentUrl} ${enrollmentResponse.status} ${enrollmentResponse.statusText}`);
@@ -44,29 +45,90 @@ export async function getServerSideProps(context) {
 
         const { data: enrollment } = await enrollmentResponse.json();
 
-        // Format the completed lessons to make them easier to work with in the component
+        // Format completed lessons
         const completedLessons = enrollment.lessons_completed.map(item => ({
             id: item.lms_lessons_id.id,
             title: item.lms_lessons_id.title,
             sort: item.lms_lessons_id.sort,
+            url: `${baseUrl}/lessons/${item.lms_lessons_id.id}?completed=true&callback=${encodeURIComponent(callbackUrl)}`,
             module: {
                 id: item.lms_lessons_id.module.id,
                 title: item.lms_lessons_id.module.title,
                 sort: item.lms_lessons_id.module.sort
             }
         })).sort((a, b) => {
-            // First sort by module.sort
             const moduleSortDiff = a.module.sort - b.module.sort;
             if (moduleSortDiff !== 0) return moduleSortDiff;
-
-            // Then sort by lesson sort
             return a.sort - b.sort;
         });
+
+        // 2. Fetch course structure with all lessons (formerly in lessons-to-complete.js)
+        const course_id = enrollment.course.id;
+        const courseUrl = `${process.env.NEXT_PUBLIC_OPTICAL_API_ENDPOINT}/items/lms_courses/${course_id}`;
+        const courseParams = {
+            fields: [
+                'id',
+                'title',
+                'modules.id',
+                'modules.title',
+                'modules.sort',
+                'modules.lessons.id',
+                'modules.lessons.title',
+                'modules.lessons.sort'
+            ].join(',')
+        };
+
+        const courseQueryString = new URLSearchParams(courseParams).toString();
+        const courseResponse = await fetch(`${courseUrl}?${courseQueryString}`, { headers });
+
+        if (!courseResponse.ok) {
+            throw new Error(`Failed to fetch course: ${courseResponse.status} ${courseResponse.statusText}`);
+        }
+
+        const { data: course } = await courseResponse.json();
+
+        // Format course structure with proper sorting
+        const formattedCourse = {
+            id: course.id,
+            title: course.title,
+            modules: course.modules
+                ? course.modules
+                    .sort((a, b) => (a.sort || 0) - (b.sort || 0))
+                    .map(module => ({
+                        id: module.id,
+                        title: module.title,
+                        sort: module.sort || 0,
+                        lessons: module.lessons
+                            ? module.lessons
+                                .sort((a, b) => (a.sort || 0) - (b.sort || 0))
+                                .map(lesson => ({
+                                    id: lesson.id,
+                                    title: lesson.title,
+                                    url: `${baseUrl}/lessons/${lesson.id}?completed=false&callback=${encodeURIComponent(callbackUrl)}`,
+                                    sort: lesson.sort || 0
+                                }))
+                            : []
+                    }))
+                : []
+        };
+
+        // 3. Calculate progress statistics
+        const totalLessonsCount = formattedCourse.modules?.reduce(
+            (total, module) => total + module.lessons.length, 0
+        ) || 0;
+
+        const progressStats = {
+            totalLessons: totalLessonsCount,
+            completedCount: completedLessons.length,
+            remainingCount: totalLessonsCount - completedLessons.length
+        };
 
         return {
             props: {
                 enrollment,
                 completedLessons,
+                lessonsToComplete: formattedCourse,
+                progressStats,
                 error: null,
                 errorStatus: null,
                 stack: null
@@ -78,6 +140,8 @@ export async function getServerSideProps(context) {
             props: {
                 enrollment: null,
                 completedLessons: [],
+                lessonsToComplete: { modules: [] },
+                progressStats: { totalLessons: 0, completedCount: 0, remainingCount: 0 },
                 error: error.message || 'Failed to load enrollment data',
                 errorStatus: error.status || 500,
                 stack: process.env.NODE_ENV === 'development' ? error.stack : null
@@ -86,51 +150,16 @@ export async function getServerSideProps(context) {
     }
 }
 
-export default function EnrollmentPage({ enrollment, completedLessons, error, errorStatus, stack }) {
+export default function EnrollmentPage({
+                                           enrollment,
+                                           completedLessons,
+                                           lessonsToComplete,
+                                           progressStats,
+                                           error,
+                                           errorStatus,
+                                           stack
+                                       }) {
     const router = useRouter();
-    const [lessonsToComplete, setLessonsToComplete] = useState([]);
-    const [loading, setLoading] = useState(false);
-    const [loadError, setLoadError] = useState(null);
-    const [progressStats, setProgressStats] = useState({
-        totalLessons: 0,
-        completedCount: 0,
-        remainingCount: 0
-    });
-
-    useEffect(() => {
-        // Skip if there's no enrollment or we're in an error state
-        if (!enrollment || error) return;
-
-        const fetchLessonsToComplete = async () => {
-            setLoading(true);
-            try {
-                const response = await fetch(`/api/lessons-to-complete?enrollment_id=${enrollment.id}`);
-                if (!response.ok) {
-                    throw new Error('Failed to fetch lessons to complete');
-                }
-                const data = await response.json();
-                setLessonsToComplete(data);
-
-                // Calculate progress stats
-                const totalLessonsCount = data.modules?.reduce((total, module) =>
-                    total + module.lessons.length, 0) || 0;
-
-                setProgressStats({
-                    totalLessons: totalLessonsCount,
-                    completedCount: completedLessons.length,
-                    remainingCount: totalLessonsCount - completedLessons.length
-                });
-
-            } catch (err) {
-                setLoadError(err.message);
-                console.error('Error fetching lessons to complete:', err);
-            } finally {
-                setLoading(false);
-            }
-        };
-
-        fetchLessonsToComplete();
-    }, [enrollment, error, completedLessons.length]);
 
     // Conditional renders for fallback, error, and missing enrollment
     if (router.isFallback) {
@@ -223,36 +252,32 @@ export default function EnrollmentPage({ enrollment, completedLessons, error, er
                     <p>Last Updated: <strong>{formatDate(enrollment.date_updated)}</strong></p>
                 </div>
 
-                {/* New Progress Summary Block */}
+                {/* Progress Summary Block */}
                 <div className="content-box">
                     <h2>Progress Summary</h2>
-                    {loading ? (
-                        <p>Loading summary data...</p>
-                    ) : (
-                        <div className="progress-summary">
-                            <div className="progress-stat">
-                                <div className="stat-number">{progressStats.totalLessons}</div>
-                                <div className="stat-label">Total Lessons</div>
-                            </div>
-                            <div className="progress-stat">
-                                <div className="stat-number">{progressStats.completedCount}</div>
-                                <div className="stat-label">Completed</div>
-                            </div>
-                            <div className="progress-stat">
-                                <div className="stat-number">{progressStats.remainingCount}</div>
-                                <div className="stat-label">Remaining</div>
-                            </div>
-                            <div className="progress-bar-container">
-                                <div
-                                    className="progress-bar-fill"
-                                    style={{
-                                        width: `${progressStats.totalLessons > 0 ?
-                                            (progressStats.completedCount / progressStats.totalLessons) * 100 : 0}%`
-                                    }}
-                                ></div>
-                            </div>
+                    <div className="progress-summary">
+                        <div className="progress-stat">
+                            <div className="stat-number">{progressStats.totalLessons}</div>
+                            <div className="stat-label">Total Lessons</div>
                         </div>
-                    )}
+                        <div className="progress-stat">
+                            <div className="stat-number">{progressStats.completedCount}</div>
+                            <div className="stat-label">Completed</div>
+                        </div>
+                        <div className="progress-stat">
+                            <div className="stat-number">{progressStats.remainingCount}</div>
+                            <div className="stat-label">Remaining</div>
+                        </div>
+                        <div className="progress-bar-container">
+                            <div
+                                className="progress-bar-fill"
+                                style={{
+                                    width: `${progressStats.totalLessons > 0 ?
+                                        (progressStats.completedCount / progressStats.totalLessons) * 100 : 0}%`
+                                }}
+                            ></div>
+                        </div>
+                    </div>
                 </div>
 
                 <div className="content-box">
@@ -262,8 +287,8 @@ export default function EnrollmentPage({ enrollment, completedLessons, error, er
                             <table className="lessons-table">
                                 <thead>
                                 <tr>
-                                    <th>Module</th>
-                                    <th>Lesson</th>
+                                    <th className="module-cell">Module</th>
+                                    <th className="lesson-cell">Lesson</th>
                                 </tr>
                                 </thead>
                                 <tbody>
@@ -271,9 +296,9 @@ export default function EnrollmentPage({ enrollment, completedLessons, error, er
                                     <tr key={lesson.id} className="lesson-row">
                                         <td className="module-cell">{lesson.module.title}</td>
                                         <td className="lesson-cell">
-                                            <a onClick={() => router.push(`/lessons/${lesson.id}`)}>
+                                            <Link href={lesson.url} rel="prefetch">
                                                 {lesson.title}
-                                            </a>
+                                            </Link>
                                         </td>
                                     </tr>
                                 ))}
@@ -287,17 +312,13 @@ export default function EnrollmentPage({ enrollment, completedLessons, error, er
 
                 <div className="content-box">
                     <h2>Lessons to Complete</h2>
-                    {loading ? (
-                        <p>Loading lessons...</p>
-                    ) : loadError ? (
-                        <p className="error-text">Error loading lessons: {loadError}</p>
-                    ) : lessonsToComplete.modules && lessonsToComplete.modules.length > 0 ? (
+                    {lessonsToComplete.modules && lessonsToComplete.modules.length > 0 ? (
                         <div className="table-container">
                             <table className="lessons-table">
                                 <thead>
                                 <tr>
-                                    <th>Module</th>
-                                    <th>Lesson</th>
+                                    <th className="module-cell">Module</th>
+                                    <th className="lesson-cell">Lesson</th>
                                 </tr>
                                 </thead>
                                 <tbody>
@@ -308,9 +329,9 @@ export default function EnrollmentPage({ enrollment, completedLessons, error, er
                                             <tr key={lesson.id} className="lesson-row">
                                                 <td className="module-cell">{module.title}</td>
                                                 <td className="lesson-cell">
-                                                    <a onClick={() => router.push(`/lessons/${lesson.id}`)}>
+                                                    <Link href={lesson.url} rel="prefetch">
                                                         {lesson.title}
-                                                    </a>
+                                                    </Link>
                                                 </td>
                                             </tr>
                                         ))

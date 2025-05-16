@@ -1,22 +1,29 @@
-import { useRouter } from 'next/router'
+import {useRouter} from 'next/router'
 import Head from 'next/head'
-import { useState } from 'react'
+import React, {useState} from 'react'
+import Link from "next/link";
 
 export async function getServerSideProps(context) {
-    // Existing fetch logic remains unchanged
-    // ...
-    const { id } = context.params
+    const {id} = context.params
+    const {completed, callback} = context.query
 
     try {
         const url = `${process.env.NEXT_PUBLIC_OPTICAL_API_ENDPOINT}/items/lms_lessons/${id}`
-        const headers = { 'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}` }
-        const response = await fetch(url, { headers: headers})
+        const headers = {'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}`}
+        const response = await fetch(url, {headers: headers})
         if (!response.ok) {
-            console.error(`Request: ${url} - ${JSON.stringify(headers)}`)
             throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`)
         }
-        const { data } = await response.json()
-        return { props: { lesson: data, error: null, errorStatus: null } }
+        const {data} = await response.json()
+        return {
+            props: {
+                lesson: data,
+                error: null,
+                errorStatus: null,
+                isCompleted: completed === 'true',
+                callbackUrl: callback || null
+            }
+        }
     } catch (error) {
         console.error('Error fetching lesson:', error)
         return {
@@ -24,38 +31,266 @@ export async function getServerSideProps(context) {
                 lesson: null,
                 error: error.message || 'Unknown error occurred',
                 errorStatus: error.status || 500,
-                stack: error.stack || null
+                stack: error.stack || null,
+                isCompleted: completed === 'true',
+                callbackUrl: callback || null
             }
         }
     }
 }
 
-export default function Page({ lesson, error, errorStatus, stack }) {
-    const router = useRouter()
-    const { id } = router.query
-    const [buttonState, setButtonState] = useState('default') // default, loading, completed, alreadyCompleted, error
-    const [errorMessage, setErrorMessage] = useState('')
+const QuizComponent = ({quizData}) => {
+    const [selectedAnswers, setSelectedAnswers] = useState({});
+    const [results, setResults] = useState({});
+    const [submitted, setSubmitted] = useState(false);
+
+    const handleAnswerSelect = (questionKey, choiceValue) => {
+        setSelectedAnswers(prev => ({
+            ...prev,
+            [questionKey]: choiceValue
+        }));
+    };
+
+    const handleSubmit = () => {
+        // Only process answers if user has selected at least one
+        if (Object.keys(selectedAnswers).length > 0) {
+            const newResults = {};
+            let correctCount = 0;
+
+            quizData.forEach(question => {
+                const isCorrect = selectedAnswers[question.question_key] === question.answer;
+                newResults[question.question_key] = isCorrect;
+                if (isCorrect) correctCount++;
+            });
+
+            setResults(newResults);
+            setSubmitted(true);
+        }
+    };
+
+    const handleReset = () => {
+        setSelectedAnswers({});
+        setResults({});
+        setSubmitted(false);
+    };
+
+    return (
+        <div className="quiz-container">
+            {quizData.map((question, index) => (
+                <div key={question.question_key} className="quiz-question">
+                    <h3>Question {index + 1}: {question.question}</h3>
+
+                    <div className="choices-container">
+                        {question.choices.map(choice => (
+                            <div key={choice.choice} className="choice-item">
+                                <label className={`choice-label ${
+                                    submitted && selectedAnswers[question.question_key] === choice.choice
+                                        ? results[question.question_key]
+                                            ? "correct-answer"
+                                            : "incorrect-answer"
+                                        : ""
+                                }`}>
+                                    <input
+                                        type="radio"
+                                        name={question.question_key}
+                                        value={choice.choice}
+                                        onChange={() => handleAnswerSelect(question.question_key, choice.choice)}
+                                        checked={selectedAnswers[question.question_key] === choice.choice}
+                                        disabled={submitted}
+                                    />
+                                    {choice.text}
+                                </label>
+                                {submitted && !results[question.question_key] &&
+                                    question.answer === choice.choice &&
+                                    selectedAnswers[question.question_key] !== choice.choice && (
+                                        <div className="correct-answer-indicator">
+                                            ← Correct Answer
+                                        </div>
+                                    )}
+                            </div>
+                        ))}
+                    </div>
+
+                    {submitted && selectedAnswers[question.question_key] && (
+                        <div className="question-feedback">
+                            {results[question.question_key]
+                                ? "Correct!"
+                                : "Incorrect. Please review the correct answer."}
+                        </div>
+                    )}
+                </div>
+            ))}
+
+            <div className="quiz-controls">
+                {!submitted ? (
+                    <button
+                        onClick={handleSubmit}
+                        className="submit-button"
+                    >
+                        Submit Answers
+                    </button>
+                ) : (
+                    <>
+                        <div className="quiz-result-summary">
+                            You got {Object.values(results).filter(Boolean).length} out of {quizData.length} questions
+                            correct.
+                        </div>
+                        <button onClick={handleReset} className="reset-button">
+                            Take Quiz Again
+                        </button>
+                    </>
+                )}
+            </div>
+
+            <style jsx>{`
+                .quiz-container {
+                    margin: 2rem 0;
+                    padding: 1.5rem;
+                    background-color: #f7f9fc;
+                    border-radius: 8px;
+                    border: 1px solid #e0e0e0;
+                }
+
+                .quiz-question {
+                    margin-bottom: 1.5rem;
+                    padding-bottom: 1.5rem;
+                    border-bottom: 1px solid #e0e0e0;
+                }
+
+                .choices-container {
+                    margin: 1rem 0;
+                }
+
+                .choice-item {
+                    margin: 0.75rem 0;
+                    position: relative;
+                }
+
+                .choice-label {
+                    display: flex;
+                    align-items: center;
+                    padding: 0.75rem;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                }
+
+                .choice-label:hover {
+                    background-color: #f0f0f0;
+                }
+
+                .choice-label input {
+                    margin-right: 0.75rem;
+                }
+
+                .correct-answer {
+                    background-color: #e6f7e6;
+                    border: 1px solid #2e7d32;
+                }
+
+                .incorrect-answer {
+                    background-color: #ffebee;
+                    border: 1px solid #c62828;
+                }
+
+                .result-indicator {
+                    margin-left: 0.5rem;
+                    font-weight: bold;
+                    font-size: 1.1rem;
+                }
+
+                .question-feedback {
+                    margin-top: 0.75rem;
+                    padding: 0.5rem;
+                    font-style: italic;
+                }
+
+                .correct-answer-indicator {
+                    margin-left: 2rem;
+                    padding: 0.5rem;
+                    color: #2e7d32;
+                    font-weight: bold;
+                }
+
+                .quiz-controls {
+                    margin-top: 1.5rem;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                }
+
+                .submit-button, .reset-button {
+                    padding: 0.5rem 1.5rem;
+                    border: none;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    font-weight: 500;
+                    font-size: 1rem;
+                }
+
+                .submit-button {
+                    background-color: #0070f3;
+                    color: white;
+                }
+
+                .submit-button:hover {
+                    background-color: #005dca;
+                }
+
+                .reset-button {
+                    background-color: #e0e0e0;
+                    color: #333;
+                    margin-top: 1rem;
+                }
+
+                .reset-button:hover {
+                    background-color: #d0d0d0;
+                }
+
+                .quiz-result-summary {
+                    margin-bottom: 1rem;
+                    font-weight: bold;
+                    font-size: 1.1rem;
+                }
+            `}</style>
+        </div>
+    );
+};
+
+export default function Page({lesson, error, errorStatus, stack, isCompleted, callbackUrl}) {
+    const router = useRouter();
+    const {id} = router.query;
+    const [buttonState, setButtonState] = useState(isCompleted ? 'alreadyCompleted' : 'default');
+    const [errorMessage, setErrorMessage] = useState('');
 
     const handleMarkAsCompleted = async () => {
-        setButtonState('loading')
+        setButtonState('loading');
 
         try {
-            const enrollmentId = "cbaf4279-0214-4244-bffd-5e8a6998ab64"
-            const response = await fetch(`/api/add-lesson?enrollment_id=${enrollmentId}&lesson_id=${id}`)
+            const enrollmentId = "cbaf4279-0214-4244-bffd-5e8a6998ab64";
+            const response = await fetch(`/api/add-lesson?enrollment_id=${enrollmentId}&lesson_id=${id}`);
 
             if (response.status === 200) {
-                setButtonState('alreadyCompleted')
+                setButtonState('alreadyCompleted');
             } else if (response.status === 201) {
-                setButtonState('completed')
+                setButtonState('completed');
             } else {
-                const data = await response.json()
-                setErrorMessage(data.error || 'An error occurred')
-                setButtonState('error')
+                const data = await response.json();
+                setErrorMessage(data.error || 'An error occurred');
+                setButtonState('error');
             }
         } catch (error) {
-            console.error('Error marking lesson as completed:', error)
-            setErrorMessage('Network error occurred')
-            setButtonState('error')
+            console.error('Error marking lesson as completed:', error);
+            setErrorMessage('Network error occurred');
+            setButtonState('error');
+        }
+    }
+
+    const handleBackClick = () => {
+        if (callbackUrl) {
+            router.push(callbackUrl);
+        } else {
+            router.push('/');
         }
     }
 
@@ -80,7 +315,7 @@ export default function Page({ lesson, error, errorStatus, stack }) {
                         {stack && <pre className="error-stack">{stack}</pre>}
                         <div className="actions">
                             <button onClick={() => window.location.reload()}>Try Again</button>
-                            <button onClick={() => router.push('/')}>Return Home</button>
+                            <button onClick={handleBackClick}>Return {callbackUrl ? 'to Course' : 'Home'}</button>
                         </div>
                     </div>
                 </main>
@@ -97,7 +332,7 @@ export default function Page({ lesson, error, errorStatus, stack }) {
                         <h1>Lesson Not Found</h1>
                         <p>We couldn't find the lesson you're looking for.</p>
                         <div className="actions">
-                            <button onClick={() => router.push('/')}>Return Home</button>
+                            <button onClick={handleBackClick}>Return {callbackUrl ? 'to Course' : 'Home'}</button>
                         </div>
                     </div>
                 </main>
@@ -152,6 +387,13 @@ export default function Page({ lesson, error, errorStatus, stack }) {
                     </div>
                 )}
 
+                {lesson.quiz && lesson.quiz.length > 0 && (
+                    <div className="content-box">
+                        <h2>Quiz</h2>
+                        <QuizComponent quizData={lesson.quiz}/>
+                    </div>
+                )}
+
                 <div className="content-box">
                     <div className="actions">
                         {buttonState === 'default' && (
@@ -169,7 +411,11 @@ export default function Page({ lesson, error, errorStatus, stack }) {
                         {buttonState === 'error' && (
                             <span className="error-text">{errorMessage}</span>
                         )}
-                        <button onClick={() => router.push('/')} className="secondary-button">Back to Home</button>
+                        <div className="secondary-button">
+                            <Link href={callbackUrl}>
+                                Back to {callbackUrl ? 'Enrollment' : 'Home'}
+                            </Link>
+                        </div>
                     </div>
                 </div>
             </main>
