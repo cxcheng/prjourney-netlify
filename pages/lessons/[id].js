@@ -7,6 +7,7 @@ export async function getServerSideProps(context) {
     const {id} = context.params
     const {completed, callback} = context.query
 
+    const callbackUrl = callback ? decodeURIComponent(callback) : null
     try {
         const url = `${process.env.NEXT_PUBLIC_OPTICAL_API_ENDPOINT}/items/lms_lessons/${id}`
         const headers = {'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}`}
@@ -14,6 +15,12 @@ export async function getServerSideProps(context) {
         if (!response.ok) {
             throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`)
         }
+        console.error("#####", {
+            lesson: null,
+            isCompleted: completed === 'true',
+            callbackUrl: callbackUrl
+        })
+
         const {data} = await response.json()
         return {
             props: {
@@ -21,7 +28,7 @@ export async function getServerSideProps(context) {
                 error: null,
                 errorStatus: null,
                 isCompleted: completed === 'true',
-                callbackUrl: callback || null
+                callbackUrl: callbackUrl
             }
         }
     } catch (error) {
@@ -33,7 +40,7 @@ export async function getServerSideProps(context) {
                 errorStatus: error.status || 500,
                 stack: error.stack || null,
                 isCompleted: completed === 'true',
-                callbackUrl: callback || null
+                callbackUrl: callbackUrl
             }
         }
     }
@@ -263,36 +270,7 @@ export default function Page({lesson, error, errorStatus, stack, isCompleted, ca
     const [buttonState, setButtonState] = useState(isCompleted ? 'alreadyCompleted' : 'default');
     const [errorMessage, setErrorMessage] = useState('');
 
-    const handleMarkAsCompleted = async () => {
-        setButtonState('loading');
-
-        try {
-            const enrollmentId = "cbaf4279-0214-4244-bffd-5e8a6998ab64";
-            const response = await fetch(`/api/add-lesson?enrollment_id=${enrollmentId}&lesson_id=${id}`);
-
-            if (response.status === 200) {
-                setButtonState('alreadyCompleted');
-            } else if (response.status === 201) {
-                setButtonState('completed');
-            } else {
-                const data = await response.json();
-                setErrorMessage(data.error || 'An error occurred');
-                setButtonState('error');
-            }
-        } catch (error) {
-            console.error('Error marking lesson as completed:', error);
-            setErrorMessage('Network error occurred');
-            setButtonState('error');
-        }
-    }
-
-    const handleBackClick = () => {
-        if (callbackUrl) {
-            router.push(callbackUrl);
-        } else {
-            router.push('/');
-        }
-    }
+    const completedUrl = isCompleted ? null : `${callbackUrl}?completed_lesson_id=${id}`;
 
     if (router.isFallback) {
         return (
@@ -315,7 +293,9 @@ export default function Page({lesson, error, errorStatus, stack, isCompleted, ca
                         {stack && <pre className="error-stack">{stack}</pre>}
                         <div className="actions">
                             <button onClick={() => window.location.reload()}>Try Again</button>
-                            <button onClick={handleBackClick}>Return {callbackUrl ? 'to Course' : 'Home'}</button>
+                            {callbackUrl &&
+                                <button onClick={handleBackClick}>Return {callbackUrl ? 'to Course' : 'Home'}</button>
+                            }
                         </div>
                     </div>
                 </main>
@@ -332,7 +312,9 @@ export default function Page({lesson, error, errorStatus, stack, isCompleted, ca
                         <h1>Lesson Not Found</h1>
                         <p>We couldn't find the lesson you're looking for.</p>
                         <div className="actions">
-                            <button onClick={handleBackClick}>Return {callbackUrl ? 'to Course' : 'Home'}</button>
+                            {callbackUrl &&
+                                <button onClick={handleBackClick}>Return {callbackUrl ? 'to Course' : 'Home'}</button>
+                            }
                         </div>
                     </div>
                 </main>
@@ -396,25 +378,18 @@ export default function Page({lesson, error, errorStatus, stack, isCompleted, ca
 
                 <div className="content-box">
                     <div className="actions">
-                        {buttonState === 'default' && (
-                            <button onClick={handleMarkAsCompleted}>Mark as Completed</button>
-                        )}
-                        {buttonState === 'loading' && (
-                            <button disabled>Processing...</button>
-                        )}
-                        {buttonState === 'alreadyCompleted' && (
-                            <span className="status-text">Lesson already completed</span>
-                        )}
-                        {buttonState === 'completed' && (
-                            <span className="status-text">Lesson updated as completed</span>
-                        )}
-                        {buttonState === 'error' && (
-                            <span className="error-text">{errorMessage}</span>
-                        )}
-                        <div className="secondary-button">
-                            <Link href={callbackUrl}>
-                                Back to {callbackUrl ? 'Enrollment' : 'Home'}
+                        {completedUrl &&
+                            <Link href={completedUrl}><span className="status-text">Mark as Completed</span>
                             </Link>
+                        }
+                        {!completedUrl &&
+                            <span className="status-text">Lesson already completed</span>
+                        }
+                        <div className="secondary-button">
+                            {callbackUrl &&
+                                <Link href={callbackUrl}>Back to {callbackUrl ? 'Enrollment' : 'Home'}
+                                </Link>
+                            }
                         </div>
                     </div>
                 </div>
@@ -510,6 +485,7 @@ export default function Page({lesson, error, errorStatus, stack, isCompleted, ca
                     border-radius: 4px;
                     background-color: #e6f7e6;
                     color: #2e7d32;
+                    text-decoration: none;
                 }
 
                 .error-text {

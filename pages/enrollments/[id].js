@@ -1,14 +1,16 @@
-import { useRouter } from 'next/router';
+import {useRouter} from 'next/router';
 import Head from 'next/head';
 import Link from "next/link";
 
 export async function getServerSideProps(context) {
-    const { id, query } = context.params;
+    const {id} = context.params;
+    const {completed_lesson_id} = context.query;
+
     try {
         const baseUrl = process.env.PUBLIC_URL || "http://localhost:3000";
         const callbackUrl = `${baseUrl}/enrollments/${id}`;
 
-        const headers = { 'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}` };
+        const headers = {'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}`};
 
         // 1. Fetch enrollment data
         const enrollmentUrl = `${process.env.NEXT_PUBLIC_OPTICAL_API_ENDPOINT}/items/lms_enrollments/${id}`;
@@ -37,13 +39,25 @@ export async function getServerSideProps(context) {
         };
 
         const queryString = new URLSearchParams(enrollmentParams).toString();
-        const enrollmentResponse = await fetch(`${enrollmentUrl}?${queryString}`, { headers });
-
+        const enrollmentResponse = await fetch(`${enrollmentUrl}?${queryString}`, {headers});
         if (!enrollmentResponse.ok) {
             throw new Error(`Failed to fetch enrollment: ${enrollmentUrl} ${enrollmentResponse.status} ${enrollmentResponse.statusText}`);
         }
 
-        const { data: enrollment } = await enrollmentResponse.json();
+        let {data: enrollment} = await enrollmentResponse.json();
+        const completed_lesson_status = completed_lesson_id ? addLesson(enrollment, completed_lesson_id) : null;
+
+        console.error(`###### 1 ${JSON.stringify(enrollment, null, 2)}`);
+
+        // Refetch the data if added
+        if (completed_lesson_status) {
+            const enrollmentResponse = await fetch(`${enrollmentUrl}?${queryString}`, {headers});
+            if (!enrollmentResponse.ok) {
+                throw new Error(`Failed to fetch enrollment: ${enrollmentUrl} ${enrollmentResponse.status} ${enrollmentResponse.statusText}`);
+            }
+            let {data: enrollment} = await enrollmentResponse.json();
+            console.error(JSON.stringify(enrollment, null, 2));
+        }
 
         // Format completed lessons
         const completedLessons = enrollment.lessons_completed.map(item => ({
@@ -79,13 +93,13 @@ export async function getServerSideProps(context) {
         };
 
         const courseQueryString = new URLSearchParams(courseParams).toString();
-        const courseResponse = await fetch(`${courseUrl}?${courseQueryString}`, { headers });
+        const courseResponse = await fetch(`${courseUrl}?${courseQueryString}`, {headers});
 
         if (!courseResponse.ok) {
             throw new Error(`Failed to fetch course: ${courseResponse.status} ${courseResponse.statusText}`);
         }
 
-        const { data: course } = await courseResponse.json();
+        const {data: course} = await courseResponse.json();
 
         // Format course structure with proper sorting
         const formattedCourse = {
@@ -140,13 +154,71 @@ export async function getServerSideProps(context) {
             props: {
                 enrollment: null,
                 completedLessons: [],
-                lessonsToComplete: { modules: [] },
-                progressStats: { totalLessons: 0, completedCount: 0, remainingCount: 0 },
+                lessonsToComplete: {modules: []},
+                progressStats: {totalLessons: 0, completedCount: 0, remainingCount: 0},
                 error: error.message || 'Failed to load enrollment data',
                 errorStatus: error.status || 500,
                 stack: process.env.NODE_ENV === 'development' ? error.stack : null
             }
         };
+    }
+}
+
+// pages/api/add-lesson.js
+export async function addLesson(enrollment, lessonId) {
+    try {
+        // Check if the lesson exists
+        const lessonUrl = `${process.env.NEXT_PUBLIC_OPTICAL_API_ENDPOINT}/items/lms_lessons/${lessonId}`;
+        const headers = {'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}`};
+
+        const lessonResponse = await fetch(lessonUrl, {headers});
+        if (!lessonResponse.ok) {
+            return lessonResponse.status;
+        }
+
+        // Extract lesson IDs from the enrollment
+        const completedLessonIds = enrollment.lessons_completed
+            ? enrollment.lessons_completed
+                .filter(lesson => lesson && lesson.lms_lessons_id)
+                .map(lesson => lesson.lms_lessons_id.id)
+            : [];
+
+        // Check if lesson is already completed
+        if (completedLessonIds.includes(lessonId)) {
+            // Lesson already marked as completed - return 200 with no body
+            return 200;
+        }
+
+        // Add lesson to completed lessons via Directus API
+        const updatedLessonIds = [...completedLessonIds, lessonId];
+
+        // Format the data for Directus junction collection
+        const lessonCompletions = updatedLessonIds.map(id => ({
+            lms_lessons_id: id
+        }));
+
+        // Update the enrollment with the new lessons_completed
+        const updateUrl = `${process.env.NEXT_PUBLIC_OPTICAL_API_ENDPOINT}/items/lms_enrollments/${enrollment.id}`;
+        const updateResponse = await fetch(updateUrl, {
+            method: 'PATCH',
+            headers: {
+                'Authorization': `Bearer ${process.env.NEXT_PUBLIC_DIRECTUS_API_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                lessons_completed: lessonCompletions
+            })
+        });
+
+        if (!updateResponse.ok) {
+            throw new Error(`Failed to update enrollment: ${updateResponse.status} ${updateResponse.statusText}`);
+        }
+
+        // Return 201 Created with the specified response format
+        return 201;
+    } catch (error) {
+        console.error('API error:', error);
+        return 500;
     }
 }
 
